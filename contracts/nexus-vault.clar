@@ -61,3 +61,71 @@
 
 ;; Contract owner for administrative functions and governance
 (define-data-var contract-owner principal tx-sender)
+
+;; ADMINISTRATIVE & GOVERNANCE FUNCTIONS
+
+;; Get the current contract owner
+(define-read-only (get-contract-owner)
+  (var-get contract-owner)
+)
+
+;; Transfer ownership to a new principal (governance function)
+(define-public (set-contract-owner (new-owner principal))
+  (begin
+    (asserts! (is-eq tx-sender (var-get contract-owner)) ERR_NOT_AUTHORIZED)
+    (asserts! (not (is-eq new-owner (var-get contract-owner)))
+      ERR_OWNER_UNCHANGED
+    )
+    (ok (var-set contract-owner new-owner))
+  )
+)
+
+;; Update the reward rate (owner only) - governance controlled
+(define-public (set-reward-rate (new-rate uint))
+  (begin
+    (asserts! (is-eq tx-sender (var-get contract-owner)) ERR_NOT_AUTHORIZED)
+    (asserts! (< new-rate u1000) ERR_INVALID_REWARD_RATE) ;; Max 100% (1000 basis points)
+    (ok (var-set reward-rate new-rate))
+  )
+)
+
+;; Update the minimum staking period (owner only) - risk management
+(define-public (set-min-stake-period (new-period uint))
+  (begin
+    (asserts! (is-eq tx-sender (var-get contract-owner)) ERR_NOT_AUTHORIZED)
+    (asserts! (> new-period u0) ERR_INVALID_PERIOD)
+    (ok (var-set min-stake-period new-period))
+  )
+)
+
+;; Add sBTC to the reward pool for distribution - treasury function
+(define-public (add-to-reward-pool (amount uint))
+  (begin
+    (asserts! (> amount u0) ERR_ZERO_STAKE)
+    ;; Transfer sBTC from sender to contract vault
+    (try! (contract-call? 'ST1F7QA2MDF17S807EPA36TSS8AMEFY4KA9TVGWXT.sbtc-token
+      transfer amount tx-sender (as-contract tx-sender) none
+    ))
+    ;; Increase reward pool balance
+    (var-set reward-pool (+ (var-get reward-pool) amount))
+    (ok true)
+  )
+)
+
+;; CORE STAKING FUNCTIONS
+
+;; Stake sBTC tokens to earn dynamic rewards
+(define-public (stake (amount uint))
+  (begin
+    (asserts! (> amount u0) ERR_ZERO_STAKE)
+    ;; Transfer sBTC from user to protocol vault
+    (try! (contract-call? 'ST1F7QA2MDF17S807EPA36TSS8AMEFY4KA9TVGWXT.sbtc-token
+      transfer amount tx-sender (as-contract tx-sender) none
+    ))
+    ;; Update or create stake record with current block height
+    (match (map-get? stakes { staker: tx-sender })
+      prev-stake
+      ;; Add to existing stake (compound position)
+      (map-set stakes { staker: tx-sender } {
+        amount: (+ amount (get amount prev-stake)),
+        staked-at: stacks-block-height,
